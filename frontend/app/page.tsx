@@ -1,5 +1,11 @@
-import { redirect } from 'next/navigation';
+import { SystemStateDashboard } from '@/components/system-state-dashboard';
+import { HomeOverview } from '@/components/home-overview';
 
 export default function HomePage() {
-  redirect('/trading');
+  return (
+    <div className="space-y-6">
+      <SystemStateDashboard />
+      <HomeOverview />
+    </div>
+  );
 }

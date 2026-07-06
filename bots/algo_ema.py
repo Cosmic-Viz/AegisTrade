@@ -1,25 +1,24 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
-from collections import deque
 from typing import Any
 
-import http_client
-import websockets
+import websockets  # pyright: ignore[reportMissingImports]
 
+import http_client
 from strategy_telemetry import StrategyTelemetryClient
 
 
 API_URL = os.getenv("API_URL", "http://localhost:8000")
 WS_URL = os.getenv("WS_URL", "ws://localhost:8000/ws/market")
-USER_ID = os.getenv("ALGO_RSI_USER_ID", "algo-rsi")
-SYMBOL = os.getenv("ALGO_RSI_SYMBOL", "AAPL")
-ORDER_QTY = int(os.getenv("ALGO_RSI_ORDER_QTY", "10"))
-WINDOW = int(os.getenv("ALGO_RSI_WINDOW", "14"))
-STRATEGY_NAME = "RSI"
-STRATEGY_SLUG = "rsi"
+USER_ID = os.getenv("ALGO_EMA_USER_ID", "algo-ema")
+SYMBOL = os.getenv("ALGO_EMA_SYMBOL", "AAPL")
+ORDER_QTY = int(os.getenv("ALGO_EMA_ORDER_QTY", "10"))
+FAST_WINDOW = int(os.getenv("ALGO_EMA_FAST_WINDOW", "12"))
+SLOW_WINDOW = int(os.getenv("ALGO_EMA_SLOW_WINDOW", "26"))
+STRATEGY_NAME = "EMA"
+STRATEGY_SLUG = "ema-crossover"
 
 telemetry = StrategyTelemetryClient(STRATEGY_NAME, STRATEGY_SLUG, USER_ID)
 
@@ -47,33 +46,19 @@ def _has_inventory() -> bool:
     return False
 
 
-def _rsi(values: deque[float]) -> float | None:
-    if len(values) < WINDOW + 1:
-        return None
-
-    gains = 0.0
-    losses = 0.0
-    previous = None
-    for value in list(values)[-WINDOW - 1 :]:
-        if previous is not None:
-            delta = value - previous
-            if delta > 0:
-                gains += delta
-            else:
-                losses += abs(delta)
-        previous = value
-
-    if losses == 0:
-        return 100.0
-
-    rs = gains / losses
-    return 100.0 - (100.0 / (1.0 + rs))
+def _ema(previous: float | None, value: float, window: int) -> float:
+    multiplier = 2 / (window + 1)
+    if previous is None:
+        return value
+    return ((value - previous) * multiplier) + previous
 
 
 async def run() -> None:
     telemetry.init()
-    closes: deque[float] = deque(maxlen=WINDOW + 1)
-    previous_rsi: float | None = None
+    fast_ema: float | None = None
+    slow_ema: float | None = None
+    previous_fast: float | None = None
+    previous_slow: float | None = None
 
     while True:
         try:
@@ -89,63 +74,68 @@ async def run() -> None:
 
                         timestamp = str(bar.get("timestamp") or payload.get("timestamp") or "")
                         telemetry.run(timestamp)
-                        closes.append(float(bar["close"]))
-                        current_rsi = _rsi(closes)
-                        if current_rsi is None:
-                            telemetry.no_data("Waiting for RSI warmup window", timestamp)
+                        close = float(bar["close"])
+                        fast_ema = _ema(fast_ema, close, FAST_WINDOW)
+                        slow_ema = _ema(slow_ema, close, SLOW_WINDOW)
+                        indicators = {"fast_ema": fast_ema, "slow_ema": slow_ema, "fast_window": FAST_WINDOW, "slow_window": SLOW_WINDOW}
+
+                        if fast_ema is None or slow_ema is None:
+                            telemetry.no_data("Waiting for EMA windows to warm up", timestamp)
                             continue
 
-                        indicators = {"rsi": current_rsi, "window": WINDOW, "closes": list(closes)}
+                        if previous_fast is not None and previous_slow is not None:
+                            crossed_up = previous_fast <= previous_slow and fast_ema > slow_ema
+                            crossed_down = previous_fast >= previous_slow and fast_ema < slow_ema
 
-                        if previous_rsi is not None:
-                            if previous_rsi <= 30.0 and current_rsi > 30.0:
+                            if crossed_up:
                                 signal_payload = telemetry.signal(
-                                    price=float(bar["close"]),
+                                    price=close,
                                     indicators=indicators,
                                     decision="BUY",
-                                    reason="RSI crossed above oversold threshold",
+                                    reason="Fast EMA crossed above slow EMA",
                                     timestamp=timestamp,
-                                    input_data={"price": float(bar["close"]), "close_history": list(closes)},
+                                    input_data={"price": close, "fast_ema": fast_ema, "slow_ema": slow_ema},
                                 )
                                 telemetry.trade_attempt(signal_payload, timestamp)
                                 _submit_order("buy")
                                 telemetry.trade_success(timestamp=timestamp)
-                            elif previous_rsi >= 70.0 and current_rsi < 70.0 and _has_inventory():
+                            elif crossed_down and _has_inventory():
                                 signal_payload = telemetry.signal(
-                                    price=float(bar["close"]),
+                                    price=close,
                                     indicators=indicators,
                                     decision="SELL",
-                                    reason="RSI crossed below overbought threshold",
+                                    reason="Fast EMA crossed below slow EMA",
                                     timestamp=timestamp,
-                                    input_data={"price": float(bar["close"]), "close_history": list(closes)},
+                                    input_data={"price": close, "fast_ema": fast_ema, "slow_ema": slow_ema},
                                 )
                                 telemetry.trade_attempt(signal_payload, timestamp)
                                 _submit_order("sell")
                                 telemetry.trade_success(timestamp=timestamp)
                             else:
                                 telemetry.signal(
-                                    price=float(bar["close"]),
+                                    price=close,
                                     indicators=indicators,
                                     decision="NO TRADE",
-                                    reason="RSI stayed inside thresholds",
+                                    reason="EMA crossover not confirmed",
                                     timestamp=timestamp,
-                                    input_data={"price": float(bar["close"]), "close_history": list(closes)},
+                                    input_data={"price": close, "fast_ema": fast_ema, "slow_ema": slow_ema},
                                 )
                         else:
                             telemetry.signal(
-                                price=float(bar["close"]),
+                                price=close,
                                 indicators=indicators,
                                 decision="NO TRADE",
-                                reason="Waiting for prior RSI value",
+                                reason="Waiting for prior EMA values",
                                 timestamp=timestamp,
-                                input_data={"price": float(bar["close"]), "close_history": list(closes)},
+                                input_data={"price": close, "fast_ema": fast_ema, "slow_ema": slow_ema},
                             )
 
-                        previous_rsi = current_rsi
+                        previous_fast = fast_ema
+                        previous_slow = slow_ema
 
         except Exception as exc:
             telemetry.crash(exc)
-            print(f"[algo-rsi] reconnecting after error: {exc}")
+            print(f"[algo-ema] reconnecting after error: {exc}")
             await asyncio.sleep(2)
 
 

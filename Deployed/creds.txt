@@ -1,0 +1,4 @@
+Password: xpH9GFhTQe7GajAoQSeZmuZ5vd7OMye5
+Internal DB URL: postgresql://admin:xpH9GFhTQe7GajAoQSeZmuZ5vd7OMye5@dpg-d950einlk1mc73c0u8og-a/aegis_db_ywij
+External DB URL: postgresql://admin:xpH9GFhTQe7GajAoQSeZmuZ5vd7OMye5@dpg-d950einlk1mc73c0u8og-a.singapore-postgres.render.com/aegis_db_ywij
+plsql command: PGPASSWORD=xpH9GFhTQe7GajAoQSeZmuZ5vd7OMye5 psql -h dpg-d950einlk1mc73c0u8og-a.singapore-postgres.render.com -U admin aegis_db_ywij

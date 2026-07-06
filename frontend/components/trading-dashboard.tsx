@@ -1,20 +1,13 @@
 'use client';
 
-import type { ReactNode } from 'react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createChart } from 'lightweight-charts';
-import { AlertTriangle, BarChart3, CandlestickChart, LayoutGrid, RefreshCw, Send, TrendingDown, TrendingUp } from 'lucide-react';
+import { AlertTriangle, BarChart3, CandlestickChart, LayoutGrid, RefreshCw } from 'lucide-react';
 
-import { API_BASE, apiGet, apiPost } from '@/lib/api';
+import { API_BASE, apiGet } from '@/lib/api';
 import type { MarketBar, MarketTick, OrderBook, Portfolio, RecentTrade } from '@/lib/types';
-import { Badge, Button, Input, Panel, Select } from '@/components/ui';
-
-type OrderFormState = {
-  side: 'buy' | 'sell';
-  orderType: 'market' | 'limit';
-  quantity: string;
-  price: string;
-};
+import { Badge, Button, Panel, Select } from '@/components/ui';
+import { tradingGlossary } from '@/lib/trading-glossary';
 
 const SYMBOLS = ['AAPL', 'MSFT', 'TSLA'];
 
@@ -48,17 +41,12 @@ export function TradingDashboard() {
   const [recentTrades, setRecentTrades] = useState<RecentTrade[]>([]);
   const [lastTick, setLastTick] = useState<MarketTick | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [submitting, setSubmitting] = useState(false);
-  const [form, setForm] = useState<OrderFormState>({
-    side: 'buy',
-    orderType: 'limit',
-    quantity: '10',
-    price: '',
-  });
 
   const chartContainerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<any>(null);
   const seriesRef = useRef<any>(null);
+  const lastSeriesTimeRef = useRef<number | null>(null);
+  const resetInFlightRef = useRef(false);
 
   const latestBar = useMemo(() => {
     if (!lastTick) return null;
@@ -90,12 +78,17 @@ export function TradingDashboard() {
       await Promise.all([refreshHistory(), refreshOrderBook(), refreshPortfolio(), refreshTrades()]);
       setError(null);
     } catch (exception) {
-      setError(exception instanceof Error ? exception.message : 'Failed to load market data');
+      setError(exception instanceof Error ? exception.message : 'failed to load market data');
     }
   }
 
   useEffect(() => {
     refreshAll();
+  }, [selectedSymbol]);
+
+  useEffect(() => {
+    lastSeriesTimeRef.current = null;
+    resetInFlightRef.current = false;
   }, [selectedSymbol]);
 
   useEffect(() => {
@@ -145,7 +138,9 @@ export function TradingDashboard() {
 
   useEffect(() => {
     if (!seriesRef.current || history.length === 0) return;
-    seriesRef.current.setData(history.map(mapBarToPoint));
+    const mapped = history.map(mapBarToPoint);
+    seriesRef.current.setData(mapped);
+    lastSeriesTimeRef.current = mapped[mapped.length - 1]?.time ?? null;
     chartRef.current?.timeScale().fitContent();
   }, [history]);
 
@@ -158,11 +153,27 @@ export function TradingDashboard() {
 
       const activeBar = payload.bars.find((bar) => bar.symbol === selectedSymbol);
       if (activeBar && seriesRef.current) {
-        seriesRef.current.update(mapBarToPoint(activeBar));
+        const point = mapBarToPoint(activeBar);
+        const lastTime = lastSeriesTimeRef.current;
+        if (lastTime != null && point.time < lastTime) {
+          if (!resetInFlightRef.current) {
+            resetInFlightRef.current = true;
+            void refreshHistory()
+              .catch((exception) => {
+                setError(exception instanceof Error ? exception.message : 'failed to reload market history');
+              })
+              .finally(() => {
+                resetInFlightRef.current = false;
+              });
+          }
+          return;
+        }
+        seriesRef.current.update(point);
+        lastSeriesTimeRef.current = point.time;
       }
     };
     socket.onerror = () => {
-      setError('Live market connection interrupted');
+      setError('live market connection interrupted');
     };
     return () => socket.close();
   }, [selectedSymbol]);
@@ -176,43 +187,34 @@ export function TradingDashboard() {
     return () => window.clearInterval(refreshInterval);
   }, [selectedSymbol]);
 
-  async function handleSubmitOrder() {
-    setSubmitting(true);
-    try {
-      const body = {
-        user_id: 'human-user',
-        symbol: selectedSymbol,
-        side: form.side,
-        order_type: form.orderType,
-        price: form.orderType === 'market' ? null : Number(form.price),
-        quantity: Number(form.quantity),
-      };
-      await apiPost('/api/orders', body);
-      await Promise.all([refreshOrderBook(), refreshPortfolio(), refreshTrades()]);
-      setError(null);
-    } catch (exception) {
-      setError(exception instanceof Error ? exception.message : 'Order submission failed');
-    } finally {
-      setSubmitting(false);
-    }
-  }
 
   const spread =
     orderBook && orderBook.bids.length > 0 && orderBook.asks.length > 0
       ? orderBook.asks[0].price - orderBook.bids[0].price
       : null;
+  const bidDepth = orderBook?.bids.reduce((sum, level) => sum + level.quantity, 0) ?? 0;
+  const askDepth = orderBook?.asks.reduce((sum, level) => sum + level.quantity, 0) ?? 0;
+  const depthImbalance = bidDepth + askDepth > 0 ? ((bidDepth - askDepth) / (bidDepth + askDepth)) * 100 : null;
 
   const notional = portfolio?.positions.reduce((sum, position) => sum + position.market_value, 0) ?? 0;
+  const latestUserTrade = useMemo(() => {
+    const selectedTrade = recentTrades.find(
+      (trade) =>
+        (trade.buyer_id === 'human-user' || trade.seller_id === 'human-user') && trade.symbol === selectedSymbol,
+    );
+    if (selectedTrade) return selectedTrade;
 
+    return recentTrades.find((trade) => trade.buyer_id === 'human-user' || trade.seller_id === 'human-user') ?? null;
+  }, [recentTrades, selectedSymbol]);
   return (
     <div className="space-y-6 pb-10">
-      <Panel className="overflow-hidden border-white/10 bg-[radial-gradient(circle_at_top_left,_rgba(126,231,135,0.12),_transparent_28%),radial-gradient(circle_at_top_right,_rgba(99,179,255,0.10),_transparent_28%),linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02))] p-6">
+      <Panel className="border-white/10 bg-[radial-gradient(circle_at_top_left,_rgba(126,231,135,0.12),_transparent_28%),radial-gradient(circle_at_top_right,_rgba(99,179,255,0.10),_transparent_28%),linear-gradient(180deg,rgba(255,255,255,0.04),rgba(255,255,255,0.02))] p-6">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
           <div>
-            <Badge>Manual trading</Badge>
-            <h1 className="mt-3 text-3xl font-semibold tracking-tight text-white">Human Trader Console</h1>
+            <Badge>manual trading</Badge>
+            <h1 className="mt-3 text-3xl font-semibold tracking-tight text-white">human trader console</h1>
             <p className="mt-2 max-w-2xl text-sm text-zinc-400">
-              Real-time order entry, charting, and portfolio review powered directly from PostgreSQL.
+              real-time order entry, charting, and portfolio review powered directly from postgresql.
             </p>
           </div>
 
@@ -226,7 +228,7 @@ export function TradingDashboard() {
             </Select>
             <Button variant="secondary" onClick={() => void refreshAll()}>
               <RefreshCw className="h-4 w-4" />
-              Refresh
+              refresh
             </Button>
           </div>
         </div>
@@ -246,12 +248,13 @@ export function TradingDashboard() {
       ) : null}
 
       <div className="grid gap-6 xl:grid-cols-[1.7fr_1fr_0.95fr]">
-        <Panel className="overflow-hidden p-4">
+        <Panel className="p-4">
           <div className="mb-4 flex items-center justify-between">
             <div>
               <div className="flex items-center gap-2 text-xs uppercase tracking-[0.24em] text-zinc-500">
                 <CandlestickChart className="h-4 w-4 text-emerald-300" />
-                Candles
+                candles
+                
               </div>
               <h2 className="mt-2 text-lg font-semibold text-white">{selectedSymbol} price action</h2>
             </div>
@@ -265,27 +268,35 @@ export function TradingDashboard() {
             <div>
               <div className="flex items-center gap-2 text-xs uppercase tracking-[0.24em] text-zinc-500">
                 <LayoutGrid className="h-4 w-4 text-sky-300" />
-                Order book
+                order book
+                
               </div>
-              <h2 className="mt-2 text-lg font-semibold text-white">Top of book</h2>
+              <h2 className="mt-2 text-lg font-semibold text-white">top of book</h2>
             </div>
             <Badge>{selectedSymbol}</Badge>
           </div>
 
           <div className="grid grid-cols-2 gap-3 text-xs uppercase tracking-[0.16em] text-zinc-500">
-            <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-2 text-emerald-200">Bids</div>
-            <div className="rounded-xl border border-red-500/20 bg-red-500/10 p-2 text-red-200">Asks</div>
+            <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-2 text-emerald-200 flex items-center gap-2">
+              <span>bids</span>
+              
+            </div>
+            <div className="rounded-xl border border-red-500/20 bg-red-500/10 p-2 text-red-200 flex items-center gap-2">
+              <span>asks</span>
+              
+            </div>
           </div>
 
           <div className="mt-3 grid grid-cols-2 gap-3">
-            <BookSide title="Bids" rows={orderBook?.bids ?? []} tone="buy" />
-            <BookSide title="Asks" rows={orderBook?.asks ?? []} tone="sell" />
+            <BookSide title="bids" rows={orderBook?.bids ?? []} tone="buy" />
+            <BookSide title="asks" rows={orderBook?.asks ?? []} tone="sell" />
           </div>
 
           <div className="mt-4 rounded-2xl border border-white/10 bg-black/30 p-3 text-xs text-zinc-400">
             <div className="flex items-center gap-2 text-zinc-200">
               <BarChart3 className="h-4 w-4" />
-              Live tape
+              live tape
+              
             </div>
             <div className="mt-2 space-y-2">
               {(recentTrades.slice(0, 4) || []).map((trade) => (
@@ -300,127 +311,9 @@ export function TradingDashboard() {
           </div>
         </Panel>
 
-        <Panel className="p-4">
-          <div className="mb-4 flex items-center justify-between">
-            <div>
-              <div className="flex items-center gap-2 text-xs uppercase tracking-[0.24em] text-zinc-500">
-                <Send className="h-4 w-4 text-amber-300" />
-                Order entry
-              </div>
-              <h2 className="mt-2 text-lg font-semibold text-white">Submit order</h2>
-            </div>
-            <Badge>human-user</Badge>
-          </div>
-
-          <div className="space-y-4">
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Side">
-                <Select value={form.side} onChange={(event) => setForm({ ...form, side: event.target.value as OrderFormState['side'] })}>
-                  <option value="buy" className="bg-black">
-                    Buy
-                  </option>
-                  <option value="sell" className="bg-black">
-                    Sell
-                  </option>
-                </Select>
-              </Field>
-              <Field label="Type">
-                <Select value={form.orderType} onChange={(event) => setForm({ ...form, orderType: event.target.value as OrderFormState['orderType'] })}>
-                  <option value="limit" className="bg-black">
-                    Limit
-                  </option>
-                  <option value="market" className="bg-black">
-                    Market
-                  </option>
-                </Select>
-              </Field>
-            </div>
-
-            <Field label="Quantity">
-              <Input
-                type="number"
-                min="1"
-                step="1"
-                value={form.quantity}
-                onChange={(event) => setForm({ ...form, quantity: event.target.value })}
-                placeholder="10"
-              />
-            </Field>
-
-            <Field label="Price">
-              <Input
-                type="number"
-                min="0"
-                step="0.01"
-                value={form.price}
-                onChange={(event) => setForm({ ...form, price: event.target.value })}
-                placeholder={form.orderType === 'market' ? 'Market order' : 'Enter limit price'}
-                disabled={form.orderType === 'market'}
-              />
-            </Field>
-
-            <Button className="w-full" onClick={() => void handleSubmitOrder()} disabled={submitting}>
-              {submitting ? 'Submitting...' : 'Place order'}
-            </Button>
-          </div>
-
-          <div className="mt-5 grid grid-cols-2 gap-3 text-xs text-zinc-400">
-            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-3">
-              <TrendingUp className="h-4 w-4 text-emerald-300" />
-              <div className="mt-2">Buy-side liquidity</div>
-              <div className="mt-1 text-white">{orderBook?.bids.length ?? 0} levels</div>
-            </div>
-            <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-3">
-              <TrendingDown className="h-4 w-4 text-red-300" />
-              <div className="mt-2">Sell-side liquidity</div>
-              <div className="mt-1 text-white">{orderBook?.asks.length ?? 0} levels</div>
-            </div>
-          </div>
-        </Panel>
+        {/* Market depth snapshot removed per submission requirements */}
       </div>
 
-      <Panel className="overflow-hidden p-4">
-        <div className="mb-4 flex items-center justify-between">
-          <div>
-            <div className="flex items-center gap-2 text-xs uppercase tracking-[0.24em] text-zinc-500">
-              <LayoutGrid className="h-4 w-4 text-violet-300" />
-              Portfolio
-            </div>
-            <h2 className="mt-2 text-lg font-semibold text-white">Human account snapshot</h2>
-          </div>
-          <Badge>{portfolio?.positions.length ?? 0} positions</Badge>
-        </div>
-
-        <div className="overflow-hidden rounded-2xl border border-white/10">
-          <table className="w-full text-sm">
-            <thead className="bg-white/[0.03] text-left text-xs uppercase tracking-[0.2em] text-zinc-500">
-              <tr>
-                <th className="px-4 py-3">Symbol</th>
-                <th className="px-4 py-3">Quantity</th>
-                <th className="px-4 py-3">Last Price</th>
-                <th className="px-4 py-3">Market Value</th>
-              </tr>
-            </thead>
-            <tbody>
-              {(portfolio?.positions ?? []).map((position) => (
-                <tr key={position.symbol} className="border-t border-white/5 text-zinc-200">
-                  <td className="px-4 py-3 font-medium">{position.symbol}</td>
-                  <td className="px-4 py-3">{position.quantity}</td>
-                  <td className="px-4 py-3">{formatCurrency(position.last_price)}</td>
-                  <td className="px-4 py-3">{formatCurrency(position.market_value)}</td>
-                </tr>
-              ))}
-              {portfolio && portfolio.positions.length === 0 ? (
-                <tr>
-                  <td colSpan={4} className="px-4 py-8 text-center text-zinc-500">
-                    No open positions.
-                  </td>
-                </tr>
-              ) : null}
-            </tbody>
-          </table>
-        </div>
-      </Panel>
     </div>
   );
 }
@@ -435,22 +328,13 @@ function Stat({ label, value, delta }: { label: string; value: string; delta: st
   );
 }
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <label className="block space-y-2">
-      <span className="text-xs uppercase tracking-[0.2em] text-zinc-500">{label}</span>
-      {children}
-    </label>
-  );
-}
-
 function BookSide({ title, rows, tone }: { title: string; rows: { price: number; quantity: number }[]; tone: 'buy' | 'sell' }) {
   return (
     <div className="rounded-2xl border border-white/10 bg-black/20 p-3">
       <div className="mb-2 text-[11px] uppercase tracking-[0.22em] text-zinc-500">{title}</div>
       <div className="space-y-2">
         {rows.length === 0 ? (
-          <div className="rounded-xl border border-dashed border-white/10 px-3 py-5 text-center text-xs text-zinc-600">No levels</div>
+          <div className="rounded-xl border border-dashed border-white/10 px-3 py-5 text-center text-xs text-zinc-600">no levels</div>
         ) : (
           rows.map((row) => (
             <div

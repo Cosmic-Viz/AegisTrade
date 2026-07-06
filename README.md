@@ -1,40 +1,44 @@
 # AegisTrade
 
-AegisTrade is a professional-style educational trading simulator. It combines a PostgreSQL-native matching engine, a FastAPI gateway, a real-time market clock, algorithmic bots, and a dark TradingView-style frontend.
+AegisTrade is a financial engine designed to simulate the core mechanics of a modern stock exchange. It emphasizes high-speed order processing and deterministic settlement so students can study exchange internals, concurrency control, and transaction durability.
 
-This repository is currently configured as a single-user teaching/demo platform. The current human trader is represented by the fixed actor `human-user`, while `market-maker`, `algo-sma`, and `algo-rsi` act as built-in system participants. The architecture is already structured so future multi-user support can be added without redesigning the data model.
+What this project does
+- Simulates live market ticks from historical data and streams them to bots and a frontend UI.
+- Accepts buy and sell orders from bots and the UI and routes them into the database for matching and execution.
+- Implements a database-native matching engine and provides observability for strategy metrics and system state.
 
-## What This Project Does Today
+Primary objectives (course brief)
+- High-speed order processing with price-time priority matching.
+- Dual-layer persistence and durability for performance-sensitive workflows.
+- Adaptive liquidity: dynamic spread adjustment responsive to market volatility.
+- Race-condition prevention and deterministic settlement with ACID guarantees.
 
-- Streams preloaded historical market data as live ticks.
-- Lets the human trader place market and limit orders.
-- Routes every order into PostgreSQL for matching and execution.
-- Runs algorithmic bots that place trades automatically.
-- Shows live trading, portfolio data, and bot statistics in the browser.
+Scope and current implementation
+- Matching engine: core order matching and trade settlement are implemented inside PostgreSQL stored procedures. Orders are matched by price and time priority.
+- Persistence: the current implementation uses PostgreSQL as the single, durable source of truth. The course brief mentioned a dual-layer approach (Redis + PostgreSQL); this repository focuses on a single durable layer (PostgreSQL) and achieves safety and determinism through transaction design and locking.
+- Adaptive liquidity: a market-maker component adjusts quoted spreads based on recent price volatility.
+- Telemetry and observability: the backend records trades, positions, and runtime telemetry; the frontend exposes dashboards for algorithms, strategies, and system health.
 
-## Tech Stack
+DBMS concepts used and why
+- Row-level locking (`FOR UPDATE` / `FOR UPDATE SKIP LOCKED`): prevents double-matching and allows safe concurrent order processing without application-level race conditions.
+- Atomic transactions (ACID): trade matching, wallet updates, and position changes occur in a single transaction to ensure consistency and durability.
+- Deterministic stored procedures: core matching logic is executed in the database to reduce network round-trips and to centralize concurrency control.
+- Indexing and query tuning: appropriate indexes are used to make orderbook and historical lookups efficient.
 
-- PostgreSQL 15+
-- Python 3.11+
-- FastAPI + asyncpg
-- Next.js 15 + React 19
-- lightweight-charts for price visualization
+Common problems encountered and how they were solved
+- Race conditions when processing concurrent orders: solved by using row-level locks and performing matching inside a single stored procedure so that the database enforces serializability of conflicting operations.
+- State synchronization between volatile runtime data and persistent storage: solved by writing final trade and wallet changes to PostgreSQL immediately in the matching transaction, keeping the persistent state authoritative.
+- Ensuring deterministic outcomes for grading and analysis: by centralizing matching logic in stored procedures, the same set of inputs produces reproducible results.
 
-## Repository Layout
+How the objectives map to implementation
+- High-speed matching: implemented via stored procedures calling efficient indexed queries and using `FOR UPDATE SKIP LOCKED` to iterate book entries without contention.
+- Durability and correctness: PostgreSQL is the source of truth; every trade is logged to the `trades` table within the committing transaction.
+- Adaptive liquidity: market-maker logic consumes recent price history and computes a volatility estimate used to widen or tighten quoted spreads.
 
-- `database/schema.sql` creates tables, constraints, and indexes.
-- `database/procedures.sql` creates the `process_order` stored procedure and seeds demo users.
-- `database/import_historical_data.sql` loads the historical CSV into PostgreSQL.
-- `backend/` contains the API, market streamer, and account bootstrap logic.
-- `bots/` contains the trading bots.
-- `frontend/` contains the UI.
+Quick start (development)
+1. Install prerequisite software: PostgreSQL 15+, Python 3.11+, Node.js (for frontend).
 
-## Quick Start
-
-### 1. Create the database
-
-Create a PostgreSQL database named `aegistrade`, or use your own database name and update `DATABASE_URL` accordingly.
-
+2. Create and prepare the database
 ```bash
 createdb aegistrade
 psql -d aegistrade -f database/schema.sql
@@ -42,12 +46,7 @@ psql -d aegistrade -f database/procedures.sql
 psql -d aegistrade -f database/import_historical_data.sql
 ```
 
-If `master_historical_data.csv` is in a different location, update the `COPY` path in `database/import_historical_data.sql` first.
-
-### 2. Start the backend
-
-From the repository root:
-
+3. Backend (API + simulator)
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -56,191 +55,15 @@ export DATABASE_URL="postgresql://postgres:postgres@localhost:5432/aegistrade"
 uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-The backend will:
-
-- connect to PostgreSQL through `asyncpg`
-- seed the `market-maker` account for the demo
-- start the background simulation clock
-- expose REST and WebSocket endpoints
-
-### 3. Start the frontend
-
-Open a second terminal:
-
+4. Frontend (Next.js)
 ```bash
 cd frontend
 npm install
-export NEXT_PUBLIC_API_URL="http://localhost:8000"
 npm run dev
 ```
 
-Then open:
+5. Open the app in your browser
+- Trading: `http://localhost:3000/trading`
+- Algorithms: `http://localhost:3000/algorithms`
 
-- `http://localhost:3000/trading`
-- `http://localhost:3000/algorithms`
 
-### 4. Start the bots
-
-Open extra terminals if you want the simulation to trade automatically.
-
-#### Market maker
-
-```bash
-source .venv/bin/activate
-python bots/market_maker.py
-```
-
-#### SMA bot
-
-```bash
-source .venv/bin/activate
-python bots/algo_sma.py
-```
-
-#### RSI bot
-
-```bash
-source .venv/bin/activate
-python bots/algo_rsi.py
-```
-
-The bots connect to `ws://localhost:8000/ws/market` and submit orders to `http://localhost:8000/api/orders`.
-
-## Environment Variables
-
-- `DATABASE_URL` controls the PostgreSQL connection string used by the backend.
-- `NEXT_PUBLIC_API_URL` controls the browser-facing API base URL.
-- `SIMULATION_INTERVAL_SECONDS` controls the market tick rate.
-- `MARKET_MAKER_CASH` controls the bootstrap cash for the liquidity bot.
-- `MARKET_MAKER_INVENTORY` controls the bootstrap inventory for the liquidity bot.
-- `MARKET_MAKER_ORDER_QTY` controls how many shares the market maker posts per quote.
-- `ALGO_USER_ID` controls the SMA bot user id.
-- `ALGO_SYMBOL` controls the SMA bot symbol.
-- `ALGO_ORDER_QTY` controls the SMA bot order size.
-- `ALGO_RSI_USER_ID` controls the RSI bot user id.
-- `ALGO_RSI_SYMBOL` controls the RSI bot symbol.
-- `ALGO_RSI_ORDER_QTY` controls the RSI bot order size.
-- `ALGO_RSI_WINDOW` controls the RSI lookback window.
-
-## System Architecture
-
-Frontend (Next.js)
-→ Backend (FastAPI)
-→ PostgreSQL (matching engine, procedures, analytics)
-
-The practical data flow is:
-
-1. Historical bars are loaded into PostgreSQL.
-2. The backend market streamer emits one tick at a time.
-3. Bots listen to the market stream and submit orders.
-4. FastAPI forwards orders directly to `CALL process_order(...)`.
-5. PostgreSQL matches orders, updates wallets and positions, and logs trades.
-6. The frontend renders trading and analytics views from the database.
-
-## Current Scope
-
-This is intentionally a single-user educational platform for now.
-
-- Human trading is represented by `human-user`.
-- Algorithmic participants are built-in demo actors, not authenticated customers.
-- The UI is designed for learning and demonstration, not production account management.
-- The code already uses `user_id` as the main key, so multi-user support can be added later.
-
-## Implemented Today
-
-- PostgreSQL-backed order matching
-- Market and limit orders
-- Portfolio retrieval
-- Algorithm statistics for `algo-sma` and `algo-rsi`
-- Recent trades feed
-- Order book aggregation
-- Historical market charting
-- Market maker, SMA, and RSI bots
-- Dark trading and analytics dashboards
-
-## Future Implementation Roadmap
-
-This is the roadmap for the next phase of the project.
-
-### Phase 1: Per-algorithm detail pages
-
-Target route: `/algorithms/{algo_name}`
-
-Each page should show:
-
-- live trades
-- current positions
-- order activity
-- realized and unrealized PnL
-- win rate
-- Sharpe ratio where feasible
-- total trades
-- average trade size
-- drawdown
-- equity curve
-- chart overlays for the strategy
-
-### Phase 2: Learning pages
-
-Target route: `/learn/{algo_name}`
-
-Each learning page should explain:
-
-- the concept in plain language
-- the technical logic and math
-- when the strategy works
-- when it fails
-- real-world usage
-- a visual diagram
-- a sample walkthrough
-
-The first learning pages should cover:
-
-- SMA crossover
-- RSI
-- mean reversion / pairs trading
-- optional momentum or breakout strategies later
-
-### Phase 3: Stronger analytics and leaderboard
-
-- Add a PostgreSQL materialized view for leaderboard reads.
-- Surface total executed trades, cash balance, equity, and ranking.
-- Add a leaderboard page in the frontend.
-- Expand strategy stats to include richer performance metrics.
-
-### Phase 4: Database scaling
-
-- Partition `historical_data` by time so large market datasets stay fast.
-- Keep the current import flow compatible with partitioned storage.
-- Make sure queries only scan the partitions they need.
-
-### Phase 5: Safer backend execution
-
-- Add deadlock retry handling around trade submission.
-- Add LISTEN/NOTIFY for real-time trade and order events.
-- Keep WebSocket market streaming, but make event delivery more robust.
-- Preserve transaction safety and row-level locking in the matching engine.
-
-### Phase 6: Platform polish
-
-- Add a smoother navigation flow between trading, algorithms, and learning.
-- Keep the UI minimal, dark, and professional.
-- Use progressive disclosure so the interface stays readable.
-- Add optional notifications for fills and strategy signals.
-
-## Useful API Endpoints
-
-- `POST /api/orders`
-- `GET /api/portfolio/{user_id}`
-- `GET /api/algo-stats`
-- `GET /api/trades/recent`
-- `GET /api/orderbook/{symbol}`
-- `GET /api/market/history?symbol=AAPL&limit=180`
-- `WS /ws/market`
-
-## Notes
-
-- The matching engine lives inside PostgreSQL through `CALL process_order(...)`.
-- The UI does not do in-memory matching.
-- The backend seeds `market-maker` automatically on startup so the liquidity bot can trade immediately.
-- If you change the database credentials, update `DATABASE_URL` before starting the backend.
