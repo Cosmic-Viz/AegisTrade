@@ -12,8 +12,8 @@ import websockets
 from strategy_telemetry import StrategyTelemetryClient
 
 
-API_URL = os.getenv("API_URL", "http://localhost:8000")
-WS_URL = os.getenv("WS_URL", "ws://localhost:8000/ws/market")
+API_URL = os.getenv("API_URL", "https://aegistrade-backend.onrender.com")
+WS_URL = os.getenv("WS_URL", "wss://aegistrade-backend.onrender.com/ws/market")
 USER_ID = os.getenv("MARKET_MAKER_USER_ID", "market-maker")
 ORDER_QTY = int(os.getenv("MARKET_MAKER_ORDER_QTY", "5"))
 STRATEGY_NAME = "Market Maker"
