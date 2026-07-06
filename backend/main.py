@@ -37,11 +37,15 @@ from .simulation import MarketStreamer
 
 
 app = FastAPI(title="AegisTrade API", version="1.0.0")
-cors_origins = settings.cors_origins or ["http://localhost:3000"]
+cors_origins = [
+    "http://localhost:3000",
+    "https://aegistrade-front.onrender.com"
+]
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
-    allow_credentials="*" not in cors_origins,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
