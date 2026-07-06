@@ -29,8 +29,16 @@ function getKeyTermsForStrategy(slug: string): string[] {
   return termMap[slug] || [];
 }
 
-export default function LearnDetailPage({ params }: { params: { slug: string } }) {
-  const content = getStrategyContent(params.slug);
+interface PageProps {
+  params: Promise<{
+    slug: string;
+  }>;
+}
+
+export default async function LearnDetailPage({ params }: PageProps) {
+  const resolvedParams = await params;
+  const content = getStrategyContent(resolvedParams.slug);
+  
   if (!content) {
     notFound();
   }
@@ -69,9 +77,9 @@ export default function LearnDetailPage({ params }: { params: { slug: string } }
           📚 key terms
         </div>
         <div className="flex flex-wrap gap-2">
-              {getKeyTermsForStrategy(content.slug).map((term) => (
-                <span key={term} className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 text-xs text-zinc-300">{term}</span>
-              ))}
+            {getKeyTermsForStrategy(content.slug).map((term) => (
+              <span key={term} className="rounded-full border border-white/10 bg-white/[0.03] px-3 py-1 text-xs text-zinc-300">{term}</span>
+            ))}
         </div>
       </Panel>
 
